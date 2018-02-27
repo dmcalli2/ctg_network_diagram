@@ -33,12 +33,12 @@ shinyServer(function(input, output) {
                  filter(trials$comparator %in% input$trial_type,
                         trials$nct_id %in% unlist(trial_rep[input$data_share])),
                by = "nct_id") %>% 
-    distinct(wider_grouping, mesh_broad_label)
+    distinct(wider_grouping, condition_preferred)
   
   make_condition_lists <- by(make_condition_lists, 
                              make_condition_lists$wider_grouping,
                              function(x) {
-                               x$mesh_broad_label %>%  unique() %>%  sort()
+                               x$condition_preferred %>%  unique() %>%  sort()
                                })
   make_condition_lists
   })
@@ -75,7 +75,7 @@ shinyServer(function(input, output) {
   trials_selected <- reactive(trials %>% 
                                 filter(wider_grouping %in% input$wider_drug_groupings,
                                        nct_id %in% 
-                                         conditions_lkp$nct_id[conditions_lkp$mesh_broad_label 
+                                         conditions_lkp$nct_id[conditions_lkp$condition_preferred 
                                                                %in% input$conditions],
                                        comparator %in% input$trial_type,
                                        nct_id %in% unlist(trial_rep[input$data_share])
