@@ -1,0 +1,247 @@
+
+
+# Review sponsors
+With and without repository trials requested.
+
+
+```{r setup}
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(cache=FALSE)
+```
+
+```{r source_functions}
+getwd()
+source("Scripts/00_functions_and_readme.R")
+library(DiagrammeR)
+load("Scratch_data/data_for_network_test.Rdata")
+```
+
+```{r sponsors}
+rep_studies <- readRDS(file = "scratch_data/trials_included_after_inelegible_interventions_excluded.Rds")
+# Add in 3 studies with clerical errors leading to initial exclusions
+rep_studies <- c(rep_studies, "NCT00348309", "NCT00096655", "NCT00236028") %>%  sort()
+
+sponsors <- readRDS(file = "Data/sponsors_20171120.Rds")
+sponsors2 <- sponsors %>% 
+  semi_join(trials, by = "nct_id") %>% 
+  filter(lead_or_collaborator == "lead") %>% 
+  mutate(requested = nct_id %in% rep_studies) %>% 
+  group_by(name) %>% 
+  summarise(n_tot = length(name),
+            n_req = sum(requested),
+            n_not = n_tot - n_req) %>% 
+  arrange(desc(n_tot))
+write_excel_csv(sponsors2, "tables/trials_by_sponsors.csv")
+```
+
+# Review sponsors with antihypertensive and antidiabetic trials
+
+```{r sponsors_andrea}
+sponsors_andrea <- read_tsv("C:/Users/dmcalli2/Documents/Academic/Standard files/Andrea/final_antihypertensive.csv")
+sponsors_keep <- read_csv("Data/reviewED_sponsors_sharing.csv")
+
+sp2 <- sponsors %>% 
+  inner_join(trials %>% select(nct_id, atc_5), by = "nct_id") %>% 
+  filter(nct_id %in% c(sponsors_andrea$anti_hypertensive, sponsors_andrea$anti_diabetic)) 
+
+sp3 <- sp2 %>% 
+  inner_join(sponsors_keep %>%
+               filter(! Respository_updated %in% c("No", "Not reviewed", "Yes", "NIH")) %>% 
+               select(name = agency, sponsor_policy = Respository_updated))
+
+sp4 <- sp3 %>% 
+  group_by(nct_id) %>% 
+  slice(1) %>% 
+  select(atc_5, nct_id, name, sponsor_policy)
+
+sp4 %>% 
+  ungroup() %>% 
+  # group_by(sponsor_policy) %>% 
+  count(sort = TRUE)
+
+sp5 <- sp4 %>% 
+  group_by(sponsor_policy) %>% 
+  mutate(name = paste(name %>%  unique() %>%  na.omit() %>%  sort(), collapse = ", ")) %>% 
+  group_by(atc_5, sponsor_policy, name) %>% 
+  count() %>% 
+  spread(key = atc_5, value = n)
+
+codes <- names(sp5)[-(1:2)]
+lbls <- atc_lbl$title[match(codes, atc_lbl$code)]
+
+code_lbls <- paste(codes, lbls, sep = "-", collapse = ", ")
+write_excel_csv(sp5, "C:/Users/dmcalli2/Documents/Academic/Standard files/Andrea/tab_sponsors.csv",  na = "")
+write_lines(code_lbls, "C:/Users/dmcalli2/Documents/Academic/Standard files/Andrea/codes_txt")
+
+```
+
+
+# Identify disease modifying drugs
+Identify trials with disease modifying drugs for any repository trial. Consider doing later for non-repository trials.
+
+```{r identify_relevant_dmard}
+load(file = "Scratch_data/csdr_yoda_biolincc.Rdata")
+
+yoda_trials <- intersect(yoda, trials$nct_id)
+novartis <- sponsors %>% 
+  filter(str_detect(tolower(name), "novart"),
+         nct_id %in% csdr$nct_id) %>%
+  distinct(nct_id) %>% 
+  `[[`(1)
+
+dmard <- trials %>% 
+  mutate(got_now = nct_id %in% c(yoda_trials, novartis)) %>% 
+  filter(nct_id %in% rep_studies) %>% 
+  filter(atc_3 %in% c("L04", "L01")) %>% 
+  group_by(b, atc_3, atc_4, atc_5, atc_7, got_now) %>% 
+  summarise(trials = sum(!duplicated(nct_id))) %>% 
+  ungroup() %>% 
+  arrange(atc_7) %>% 
+  left_join(atc_lbl, by = c("atc_5" = "code")) %>% 
+  select(name = b, atc_7, title, got_now, trials)
+saveRDS(dmard, file = "scratch_data/dmards.Rds")
+
+```
+
+
+# Select desired drug groupings and conditions
+
+```{r select_groupings_conditions}
+
+# input <- list(trial_type = c("diff_class", "plac_stnd", "poss_plac_stnd", "undefined"),
+#               conditions = c("Hypertension"),
+#               wider_drug_groupings = c("C02 ANTIHYPERTENSIVES", "C03 DIURETICS", 
+# "C04 PERIPHERAL VASODILATORS", "C05 VASOPROTECTIVES", "C07 beta-Adrenergic Blocking Agents", 
+# "C08 CALCIUM CHANNEL BLOCKERS", "C09 AGENTS ACTING ON THE RENIN-ANGIOTENSIN SYSTEM"),
+#               trials_drop = FALSE)
+
+input <- list(trial_type = c("diff_class", "plac_stnd", "poss_plac_stnd", "undefined"),
+              conditions = c("Diabetes Mellitus, Type 2"),
+              wider_drug_groupings = c("A10A INSULINS AND ANALOGUES", 
+"A10B BLOOD GLUCOSE LOWERING DRUGS, EXCL. INSULINS"),
+              trials_drop = FALSE)
+
+# Wrap dataframe in function to allow code sharing with shiny
+trials_selected <- function() {
+  trials %>% 
+                      filter(wider_grouping %in% input$wider_drug_groupings,
+                             nct_id %in% 
+                               conditions_lkp$nct_id[conditions_lkp$mesh_broad_label 
+                                                     %in% input$conditions],
+                             comparator %in% input$trial_type) %>% 
+                      arrange(wider_grouping, atc_3, atc_4, atc_5) %>% 
+    distinct()
+}
+nrow(trials_selected())
+```
+
+# Create Edges
+
+```{r rename_create_edges}
+# create edges
+# Wrap dataframe in function to make same code as in Shiny
+my_edges <- function() {
+  edge_nct_id <- trials_selected() %>% 
+  select(from = b, to = nct_id, atc_3, atc_4, wider_grouping) %>% 
+  distinct()
+edge_drug <- trials_selected() %>% 
+  select(from = atc_5, to = b, atc_3, atc_4, wider_grouping) %>% 
+  distinct()
+edge_5 <- trials_selected() %>% 
+  mutate(from = atc_4, to = atc_5) %>% 
+  distinct(from, to, atc_3, atc_4, wider_grouping)
+edge_4 <-  trials_selected() %>% 
+  mutate(from = atc_3, to = atc_4) %>% 
+  distinct(from, to, atc_3, atc_4, wider_grouping)
+my_edges <- bind_rows(trial = edge_nct_id,
+                      drug = edge_drug,
+                      e4_5 = edge_5,
+                      e3_4 = edge_4,
+                      .id = "type_of_edge")
+if(input$trials_drop == TRUE) my_edges <- my_edges %>% 
+  filter(type_of_edge != "trial")
+
+my_edges
+}
+```
+
+# Create nodes
+
+```{r create_nodes}
+# Wrap dataframe in function to make same code as in Shiny
+my_nodes <- function() {
+  if(nrow(trials_selected()) ==0){
+    my_nodes <- data.frame(id = 1,label = "No trials of this drug type for selected condition(s)")
+  } else {
+    nct_nodes <- trials_selected() %>% 
+      mutate(title = conditions,
+             label = nct_id,
+             value = 12.5* enrollment/sum(enrollment)) %>% 
+      select(id = nct_id, title, wider_grouping, group = atc_5, label, value, comparator) %>% 
+      mutate(shape = "diamond", atc_level = "NA") %>% 
+      distinct()
+    
+    nct_nodes$shape[nct_nodes$comparator == "undefined"] <- "dot"
+    nct_nodes$shape[nct_nodes$comparator == "diff_class"] <- "diamond"
+    nct_nodes$shape[nct_nodes$comparator == "plac_stnd"] <- "star"
+    nct_nodes$shape[nct_nodes$comparator %in% c("same_4")] <- "triangle"
+    nct_nodes$shape[nct_nodes$comparator %in% c("same_5")] <- "triangleDown"
+    
+    nct_nodes$comparator <- NULL
+    
+    drug_nodes <- trials_selected() %>% 
+      mutate(title = NA) %>% 
+      select(id = b, title, wider_grouping, group = atc_5) %>% 
+      mutate(shape = "rectangle", atc_level = "atc_7", label = id,
+             value = 1) %>% 
+      distinct()
+    
+    class_nodes <- trials_selected() %>% 
+      select(atc_3, atc_4, atc_5, wider_grouping) %>% 
+      mutate(group = atc_5) %>% 
+      gather(key = "atc_level", value = "id", - wider_grouping, -group) %>% 
+      mutate(shape = "circle", label = id, value = 1) %>% 
+      distinct() %>% 
+      inner_join(atc_lbl, c("id" = "code"))
+    
+    if(input$trials_drop == TRUE) nct_nodes <- NULL
+
+    my_nodes <- bind_rows(nct_nodes, drug_nodes, class_nodes) 
+  }
+  my_nodes
+}
+```
+
+
+```{r draw_graphs_vn}
+library(visNetwork)
+visnetwork_obj <- visNetwork(nodes = my_nodes() %>%
+               distinct(id, .keep_all = TRUE),
+             edges = my_edges()) %>%
+    # visHierarchicalLayout(direction = "LR", sortMethod = "directed") %>% 
+    visOptions(collapse = TRUE, nodesIdSelection = TRUE)
+# visnetwork_obj
+# visSave(visnetwork_obj, file = "antidiabetic_trials.html", selfcontained = TRUE, background = "white")
+# write_csv(trials_selected(), "Scratch_data/antidiabetic_trials.csv")
+```
+
+
+```{r draw_graphs_dr}
+library(DiagrammeR)
+dr_nodes <- my_nodes() %>%  distinct(id, .keep_all = TRUE)
+dr_edges <- my_edges() %>%  distinct(from, to, .keep_all = TRUE)
+
+lkp_id <- seq_along(dr_nodes$id)
+names(lkp_id) <- dr_nodes$id
+
+dr_nodes2 <- create_node_df(n = nrow(dr_nodes),
+                            label = dr_nodes$id,
+                            type = dr_nodes$atc_level)
+dr_edges2 <- create_edge_df(from = lkp_id[dr_edges$from],
+                            to = lkp_id[dr_edges$to],
+                            rel = NA)
+diagrammeR_obj <- create_graph(dr_nodes2,
+                               dr_edges2) 
+render_graph(diagrammeR_obj)
+export_graph(diagrammeR_obj, file_name = "figures/network_graph.svg")
+```

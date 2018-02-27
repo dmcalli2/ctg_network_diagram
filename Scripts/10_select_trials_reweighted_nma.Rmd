@@ -1,0 +1,481 @@
+---
+title: "Select trials for simulation"
+output: html_notebook
+---
+
+
+# Select trials
+
+Based on reviewing trials in Shiny app. Select drug groupings oral antidabetic medication (A10B) for diabetes, type 1 DM and type 2 DM. Choose placebo/standard care controlled or unknown. Do not include "different class" head to head comparisons.
+
+Secondy, choose obstructive airways disease drugs (all three drug groupings) for the conditions asthma and COPD. Again choose placebo/standard care controlled or unknown.
+
+Need to review the unknown comparisons, and the participant numbers where enrollment was imputed.
+
+Also need to identify the standard deviation for change in FEV1, change in HbA1c and the rate of exacerbation and rate of complications. For diabetes need to see which complications most commonly recorded.
+
+```{r setup}
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(cache=FALSE)
+```
+
+```{r source_functions}
+getwd()
+source("Scripts/00_functions_and_readme.R")
+```
+
+```{r read_data}
+load(file = "Scratch_data/data_for_network.Rdata")
+codes <- readRDS("scratch_data/normalised_names_and_atc_codes.rds")
+```
+
+# Select trials
+Select trials with relevant characteristics and drop additional fields.
+
+```{r select_trials}
+input <- list(trial_type = c("plac_stnd", "poss_plac_stnd", "undefined", "same_4"),
+              conditions = c("Lung Diseases, Obstructive",
+                             "Diabetes Mellitus, Type 1",
+                             "Diabetes Mellitus, Type 2",
+                             "Diabetes Mellitus"),
+              wider_drug_groupings = c(
+                "R03DX Other systemic drugs for obstructive airway diseases in ATC",
+                "SELECTED DRUGS FOR OBSTRUCTIVE AIRWAY DISEASES bronchodilator",
+                "SELECTED DRUGS FOR OBSTRUCTIVE AIRWAY DISEASES glucocorticosteroid",
+                "A10B BLOOD GLUCOSE LOWERING DRUGS, EXCL. INSULINS"))
+
+# Wrap dataframe in function to allow code sharing with shiny
+trials_selected <- trials %>% 
+  filter(wider_grouping %in% input$wider_drug_groupings,
+         nct_id %in% 
+           conditions_lkp$nct_id[conditions_lkp$mesh_broad_label 
+                                 %in% input$conditions],
+         comparator %in% input$trial_type) %>% 
+  select(nct_id, atc_7, a, b, enrollment, conditions, nct_id_link, official_title, comparator) %>% 
+  distinct()
+
+table(trials_selected$conditions)
+```
+
+
+# Simplify conditions
+Apply rules to simplify assignment of conditions. In terms of priority if any:-
+For obstructive: COPD > asthma > everything else
+For diabetes, there is only one  type 1 DM study, so exclude.
+
+If any missing after this, review trials. On doing so all "Diabetes Mellitus" trials where for "Diabetes Mellitus, Type 2" and the single "Lung Diseases, Obstructive" trial was a trial of COPD.
+
+```{r simplify_conditions}
+trials_selected <- trials_selected %>%
+  filter(!conditions == "Diabetes Mellitus, Type 1") %>% 
+  mutate(conditions_new = NA)
+ReplaceCondition <- function(mydf, mycond){
+  mydf %>% 
+    mutate(conditions_new = if_else(str_detect(conditions, mycond), mycond,
+                                    as.character(conditions_new)))
+}
+trials_selected <- trials_selected %>% 
+  ReplaceCondition("Asthma") %>% 
+  ReplaceCondition("Pulmonary Disease, Chronic Obstructive") %>% 
+  ReplaceCondition("Diabetes Mellitus, Type 2") 
+
+trials_selected <- trials_selected %>% 
+  select(-conditions) %>% 
+  rename(conditions = conditions_new) %>% 
+  distinct()
+```
+
+# Review trials without defined comparator status
+
+In review assign as standard care if drug added to other agent (eg fluticasone and salmeterol veruss salmeterol is fluticasone veruss standard care). As per the analysis with arm-level data, if any arm comaprison is placebo or standard care then it is a placebo/standard care study.
+
+Select most extreme comparison, whether it is different drug, different class or standard care/placebo. For the purposese of this analysis, it is enough to know that it is a drug comparison, no need to check if it is the same class or a different class.
+
+Have only completed for diabetes drugs so far, not all inhaled drugs.
+
+```{r review_comparator}
+trial_no_compare <- trials_selected %>% 
+  filter(comparator %in% c("undefined", "poss_plac_stnd")) %>% 
+  distinct(nct_id, official_title, nct_id_link, a, b, comparator)
+write_csv(trial_no_compare, path = "Scratch_data/review_trial_type_clrd_dm.csv")
+trial_no_compare_dm <- read_csv("Data/reviewED_trial_type_clrd_dm.csv")
+
+trial_no_compare_dm %>% 
+  count(a, sort = TRUE)
+
+excld <- c("non randomised comparison", "delivery method", "timing study")
+plac_stnd <- c("placebo", "standard care")
+
+placebo_standard <- trial_no_compare_dm %>% 
+  filter(a %in% plac_stnd) %>% 
+  select(nct_id, a) %>% 
+  mutate(comparator = "plac_stnd") %>% 
+  inner_join(trials_selected %>%  select(-a, -comparator))
+
+drug_compare <- trial_no_compare_dm %>% 
+  filter(!a %in% c(plac_stnd, excld)) %>% 
+  select(nct_id, a) %>% 
+  mutate(comparator = "drug_class_not_compared") %>% 
+  inner_join(trials_selected %>%  select(-a, -comparator)) %>% 
+  inner_join(codes %>%  select(atc_7_a = CODE, a = drug_name))
+
+IfElseSame <- function (mydf, lvl){
+  mydf %>% 
+    group_by(a) %>% 
+    mutate(comparator = 
+             if_else(all(is.na(comparator)) & any(str_sub(atc_7,1,lvl) == str_sub(atc_7_a, 1, lvl)),
+                                as.character(lvl), unique(comparator)))
+}
+drug_compare <- drug_compare %>% 
+  mutate( comparator = as.character(NA)) %>% 
+  IfElseSame(7) %>% 
+  IfElseSame(5) %>% 
+  IfElseSame(4) %>% 
+  ungroup() %>% 
+  select(-atc_7_a) %>% 
+  distinct()
+
+drug_compare <- drug_compare %>% 
+  mutate(comparator = if_else(is.na(comparator), "diff_class", paste0("same_", comparator))) %>% 
+  mutate(comparator = if_else(comparator == "same_7", "same_drug", comparator))
+
+```
+
+# Create diabetes drugs dataset
+
+Apply trial type criteria to diabetes trials. Main difference from selection for simulation is also include head to head trials. Need to manually review 20 trials to check what they are
+
+```{r dm_dataset}
+table(trials_selected$conditions)
+diabetes <- trials_selected %>% 
+  filter(conditions %in% c("Diabetes Mellitus, Type 2",
+                           "Diabetes Mellitus, Type 1",
+                           "Diabetes Mellitus")) %>% 
+  mutate(comparator = if_else(comparator == "undefined" &
+                              nct_id %in% 
+                                trial_no_compare_dm$nct_id[trial_no_compare_dm$a %in% plac_stnd],
+                              "plac_stnd",
+                              comparator),
+         comparator = if_else(comparator == "undefined", "head to head", comparator)) %>% 
+  filter(! nct_id %in% trial_no_compare_dm$nct_id[trial_no_compare_dm$a %in% excld]) 
+
+diabetes_rv <- diabetes %>% 
+  filter(comparator %in% c("head to head", "poss_plac_stnd"))
+write_csv(diabetes_rv, "scratch_data/reivew_diabetes_drugs_head_to_head.csv")
+```
+
+# Identify number of diabetes trials with missing enrollment data.
+None of imputed enrollment studies where in these selected diabetes studies.
+
+```{r rv_missing_enrol}
+enrol_mis <- readRDS("Scratch_data/enrollement_missing.Rds")
+intersect(enrol_mis, diabetes$nct_id)
+```
+
+# Identify number of arms
+
+There were 11 selected diabetes trials without arm information. I reviewed CTG to determine number of arms for diabetes trials where this information was not available. Was either apparent from title, CTG report or from publications.
+
+Recorded this in the same table where recorded study comparator type.
+
+```{r read_arms}
+arms <- readRDS(file = "scratch_data/number_of_arms_trials.Rds")
+arms <- arms %>% 
+  semi_join(diabetes) %>% 
+  rename(arms = arm_max)
+
+stem(arms$arms)
+
+diabetes_xmn_arms <- diabetes %>% 
+  anti_join(arms) %>% 
+  distinct(nct_id)
+
+arms_lkd <- read_csv("Data/reviewED_trial_type_clrd_dm.csv") %>% 
+  select(nct_id, arms = arms_looked_up) %>% 
+  distinct() %>% 
+  na.omit()
+
+arms <- bind_rows(arms, arms_lkd)
+
+diabetes <- diabetes %>%
+  inner_join(arms)
+
+```
+
+# Identify outcomes measured
+
+
+The following number of trials incldued outcome data on CTG.
+
+## HbA1c
+Of the six trials not recorded as having included HbA1c, I examined two. Of these NCT00097786 and NCT01131676 both recoded HbA1c as part of the trial, and the latter performed a sensitivity analysis for change in HbA1c. The former was a trial of progression to type 2 diabetes. Haven't looked at the other 4 trials.
+
+```{r outcomes_hba1c}
+#Connect to CTG
+# drv <- dbDriver('PostgreSQL')
+# con <- dbConnect(drv, dbname="aact",host="aact-prod.cr4nrslb1lw7.us-east-1.rds.amazonaws.com",
+#                  port=5432, user="aact", password="aact")
+# dbListTables(con) %>%  sort()
+# 
+# diab_nct_ids <- MakeCommaSep(diabetes$nct_id)
+# designs <- dbGetQuery(con, paste0("SELECT * FROM designs
+#                        WHERE designs.nct_id IN (",
+#                        diab_nct_ids,
+#                        ")"))
+# outcome_analyses <- dbGetQuery(con, paste0("SELECT * FROM outcome_analyses
+#                        WHERE outcome_analyses.nct_id IN (",
+#                        diab_nct_ids,
+#                        ")"))
+# outcomes <- dbGetQuery(con, paste0("SELECT * FROM outcomes
+#                        WHERE outcomes.nct_id IN (",
+#                        diab_nct_ids,
+#                        ")"))
+# design_outcomes <- dbGetQuery(con, paste0("SELECT * FROM design_outcomes
+#                        WHERE design_outcomes.nct_id IN (",
+#                        diab_nct_ids,
+#                        ")"))
+# 
+# dbDisconnect(con)
+# saveRDS(outcome_analyses, "Scratch_data/outcome_analyses_diabets_trials.Rds")
+# saveRDS(designs, "Scratch_data/designs_diabets_trials.Rds")
+# saveRDS(design_outcomes, "Scratch_data/design_outcomes_diabets_trials.Rds")
+# saveRDS(outcomes, "Scratch_data/outcomes_diabets_trials.Rds")
+outcome_analyses <- readRDS("Scratch_data/outcome_analyses_diabets_trials.Rds")
+designs <- readRDS("Scratch_data/designs_diabets_trials.Rds")
+outcomes <- readRDS("Scratch_data/outcomes_diabets_trials.Rds")
+design_outcomes <- readRDS("Scratch_data/design_outcomes_diabets_trials.Rds")
+
+sum(!duplicated(outcomes$nct_id)) # trials with outcomes reported 
+
+outcomes_agg <- outcomes %>%
+  mutate(hba1c = str_detect(str_to_lower(title), "a1c|glycos")) %>% 
+  group_by(nct_id) %>% 
+  summarise(hba1c_primary = any(hba1c & outcome_type == "Primary"),
+            hba1c = any(hba1c))
+outcomes_agg %>% 
+  count(hba1c, hba1c_primary)
+
+xmn <- outcomes %>% 
+  semi_join(outcomes_agg %>%  filter(!hba1c)) 
+
+```
+
+## Examine SD for change in HbA1c
+96 appear to report change from baseline as a string. All of these are percent or percentage.
+Take ones reporting a mean and SD and take the longest time frame for the SD. Does this by taking the last number in the string.
+
+```{r outcomes_hba1c_sd}
+hba1c <- outcomes %>%
+  filter(str_detect(str_to_lower(title), "a1c|glycos")) %>% 
+  filter(str_detect(str_to_lower(title), "change"),
+         str_detect(str_to_lower(title), "baseline"))
+sum(!duplicated(hba1c$nct_id))
+
+hba1c_mean_sd <- hba1c %>%
+  mutate(week = time_frame %>% 
+           stringi::stri_reverse() %>% 
+           parse_number() %>% 
+           stringi::stri_reverse() %>% 
+           as.integer()) %>% 
+  arrange(nct_id, desc(week))
+
+hba1c_mean_sd_res <- hba1c_mean_sd %>%
+  filter(param_type %in% "Mean" & dispersion_type == "Standard Deviation") %>%
+  group_by(nct_id) %>% 
+  slice(1)
+
+# drv <- dbDriver('PostgreSQL')
+# con <- dbConnect(drv, dbname="aact",host="aact-prod.cr4nrslb1lw7.us-east-1.rds.amazonaws.com",
+#                  port=5432, user="aact", password="aact")
+# hba1c_mean_sd_res2 <- dbGetQuery(con,
+#                                 paste0("SELECT * FROM outcome_measurements WHERE outcome_id IN (",
+#                        paste(hba1c_mean_sd_res$id, collapse = ","),
+#                        ")")
+#                        )
+# saveRDS(hba1c_mean_sd_res2, "Scratch_data/outcomes_diabets_trials_mean_sd.Rds")
+# dbDisconnect(con)
+hba1c_mean_sd_res2 <- readRDS("Scratch_data/outcomes_diabets_trials_mean_sd.Rds")
+
+hba1c_mean_sd_res_agg <- hba1c_mean_sd_res2 %>% 
+  group_by(nct_id) %>% 
+  summarise_at(vars(param_value_num, dispersion_value_num),  mean)
+print("Standard deviation is")
+
+smrs_sd <- map(list(mean = mean, sd = sd, 
+         quantile = function(x) quantile(x, probs = c(0, 0.1, 0.25, 0.5, 0.75, 0.9, 1))),
+    function(f) f(hba1c_mean_sd_res_agg$dispersion_value_num))
+smrs_sd
+```
+
+## Examine difference in difference
+The mean difference in change in HbA1c is estimated from the 8 trials which report this in the results section.
+
+```{r outcomes_hba1c_diff_in_diff}
+# drv <- dbDriver('PostgreSQL')
+# con <- dbConnect(drv, dbname="aact",host="aact-prod.cr4nrslb1lw7.us-east-1.rds.amazonaws.com",
+#                  port=5432, user="aact", password="aact")
+# hba1c_outcome_analyses <- dbGetQuery(con,
+#                                 paste0("SELECT * FROM outcome_analyses WHERE outcome_id IN (",
+#                        paste(hba1c_mean_sd$id, collapse = ","),
+#                        ")")
+#                        )
+# dbDisconnect(con)
+# saveRDS(hba1c_outcome_analyses, "Scratch_data/outcomes_diabets_trials_diff_se.Rds")
+hba1c_outcome_analyses <- readRDS("scratch_data/outcomes_diabets_trials_diff_se.Rds")
+print ("mean treatment effect is")
+hba1c_outcome_analyses_smry <- hba1c_outcome_analyses %>% 
+  group_by(nct_id) %>% 
+  summarise(param_value = mean(param_value, na.rm = TRUE)) %>% 
+  na.omit() %>% 
+  ungroup()
+
+smrs_mean <- map(list(mean = mean, sd = sd, 
+         quantile = function(x) quantile(x, probs = c(0, 0.1, 0.25, 0.5, 0.75, 0.9, 1))),
+    function(f) f(hba1c_outcome_analyses_smry$param_value))
+smrs_mean
+```
+
+
+# Final Summary diabetes dataset
+
+```{r diabetes_agg}
+diabetes_final <- diabetes %>% 
+  mutate(n_per_grp = (enrollment/arms) %>%  as.integer()) %>% 
+  select(nct_id, drug = b, atc = atc_7, n_per_grp) %>% 
+  mutate(atc_5 = str_sub(atc, 1, 5)) %>% 
+  inner_join(codes %>%
+               select(atc_5 = CODE, drug_class = drug_name) %>% 
+               distinct(atc_5, .keep_all = TRUE))
+```
+
+
+## Number of trials and participants overall
+```{r diabetes_overall}
+diabetes_final %>% 
+  summarise(classes = sum(!duplicated(drug_class)),
+            drugs = sum(!duplicated(drug)),
+            trials = length(drug),
+            participants = sum(2*n_per_grp)) 
+```
+
+## Number of drugs, trials and participants within class
+
+```{r diabetes_class}
+
+
+diabetes_final_class <- diabetes_final %>% 
+  group_by(atc_5, drug_class) %>%
+  summarise(drugs = sum(!duplicated(drug)),
+            trials = length(drug),
+            participants = sum(2*n_per_grp)) %>% 
+  arrange(atc_5)
+diabetes_final_class
+write_csv(diabetes_final_class, path = "../tables/drug_classes.csv")
+```
+
+
+## Number of trials and participants within drug and class
+```{r diabetes_class_drug}
+diabetes_final_drug <- diabetes_final %>% 
+  group_by(atc_5, drug_class, drug, atc) %>%
+  summarise_at(vars(n_per_grp), .funs = list(trials = length,
+                                          participants = function(x) sum(2*x))) %>% 
+  arrange(atc_5, drug)
+diabetes_final_drug
+write_csv(diabetes_final_drug, path = "tables/drug_classes_drug.csv")
+
+```
+
+# Examine sponsors
+
+
+```{r sponsors}
+getwd()
+sponsors <- readRDS(file = "Data/sponsors_20171120.Rds")
+
+diabetes_estblshd <- diabetes_final %>% 
+              filter(atc_5 %in%  c("A10BH","A10BJ", "A10BK")) %>% 
+  inner_join(sponsors)
+saveRDS(diabetes_estblshd, "scratch_data/diabetes_3_classes_placebo.Rds")
+
+rm(sponsors)
+csdr_yoda_biolincc <- load(file = "Scratch_data/csdr_yoda_biolincc.Rdata")
+studies <- readRDS(file = "Scratch_data/selected_studies_extra_fields.Rds")
+studies <- studies %>% 
+  semi_join(diabetes_estblshd, by = "nct_id")
+
+diabetes_got <- diabetes_estblshd %>% 
+  filter(nct_id %in% c(csdr_yoda, biolincc), lead_or_collaborator == "lead")
+diabetes_not_got <- diabetes_estblshd %>% 
+  anti_join(diabetes_got, by = "nct_id") 
+table(diabetes_not_got$name)
+filter(diabetes_estblshd, nct_id %in% yoda)
+
+diabetes_not_got_agg <- diabetes_not_got %>% 
+  filter(lead_or_collaborator == "lead") %>% 
+  count(name)
+write_csv(diabetes_not_got_agg, "tables/sponsors_diabets_new.csv")
+
+```
+
+## Examine outcome types
+Outcome types for the three classes. cv search worked as long as wasn't change from baseline.
+"Change From Baseline"
+
+```{r outcome_3_classes}
+
+cv <- "\\b(cardio|myocard|mace|cv|heart|coronar|ischaemic)"
+chng <- "Change From Baseline"
+setdiff(diabetes_estblshd$nct_id, design_outcomes$nct_id)
+
+outcomes_both <- bind_rows(outcomes %>%  select(nct_id, outcome_type, title, description),
+                           design_outcomes %>%  select(nct_id, outcome_type, title = measure,
+                                                       description)) %>% 
+  distinct()
+
+outcomes_establshd <- outcomes_both %>% 
+  semi_join(diabetes_estblshd, by = "nct_id") %>% 
+  mutate(cv = str_detect(title, cv)|str_detect(description, cv)) %>% 
+  select(cv, title, description) %>% 
+  distinct(title, cv, .keep_all = TRUE) %>% 
+  arrange(cv, title)
+write_csv(outcomes_establshd, "Scratch_data/diabetes_trials_3_classes_outcomes.csv")
+
+mace <- outcomes_both %>% 
+  semi_join(diabetes_estblshd, by = "nct_id") %>% 
+  filter(str_detect(title, cv)|str_detect(description, cv),
+         !str_detect(title, chng)) %>% 
+  mutate(outcome_type = str_to_lower(outcome_type)) %>% 
+  group_by(nct_id) %>% 
+  summarise(primary = any(outcome_type == "primary"),
+            secondary = any(outcome_type == "secondary"),
+            other = any(outcome_type == "other")) %>% 
+  mutate(secondary = if_else(primary, FALSE, secondary))
+mace %>% 
+  summarise(primary = sum(primary), secondary = sum(secondary), other = sum(other))
+
+diab_mace_smry <- diabetes_estblshd %>% 
+  mutate(mace = nct_id %in% mace$nct_id[mace$primary|mace$secondary]) %>% 
+  mutate(participants = n_per_grp *2) %>% 
+  distinct(atc_5, drug, mace, participants) %>% 
+  group_by(atc_5, mace) %>% 
+  summarise(trials = length(participants), drugs = sum(!duplicated(drug)),
+            participants = sum(participants))
+
+
+```
+
+# Count non-inferiority
+
+```{r count_non_inf}
+outcome_analyses <- outcome_analyses %>% 
+  semi_join()
+table(designs$intervention_model)
+```
+
+# Save results
+
+```{r save_results}
+save(diabetes_final, smrs_mean, smrs_sd, file = "scratch_data/data_for_simulation.Rdata")
+```
+

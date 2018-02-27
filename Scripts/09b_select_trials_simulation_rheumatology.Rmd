@@ -1,0 +1,141 @@
+---
+title: "Select trials for simulation, rheumatology"
+output: html_notebook
+---
+
+
+# Select trials
+
+Based on reviewing trials in Shiny app. Select drug groupings oral antidabetic medication (A10B) for diabetes, type 1 DM and type 2 DM. Choose placebo/standard care controlled or unknown. Do not include "different class" head to head comparisons.
+
+Secondy, choose obstructive airways disease drugs (all three drug groupings) for the conditions asthma and COPD. Again choose placebo/standard care controlled or unknown.
+
+Need to review the unknown comparisons, and the participant numbers where enrollment was imputed.
+
+Also need to identify the standard deviation for change in FEV1, change in HbA1c and the rate of exacerbation and rate of complications. For diabetes need to see which complications most commonly recorded.
+
+```{r setup}
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(cache=FALSE)
+```
+
+```{r source_functions}
+getwd()
+source("Scripts/00_functions_and_readme.R")
+```
+
+```{r read_data}
+load(file = "Scratch_data/data_for_network.Rdata")
+codes <- readRDS("scratch_data/normalised_names_and_atc_codes.rds")
+```
+
+# Select trials
+Select trials with relevant characteristics and drop additional fields.
+
+```{r conditions}
+table(trials$wider_grouping)
+```
+
+```{r select_trials}
+input <- list(trial_type = c("plac_stnd", "poss_plac_stnd", "undefined"),
+              conditions = c("Arthritis, Rheumatoid", 
+                               "Psoriasis", "Spondylitis, Ankylosing", 
+                              "Lupus Erythematosus, Systemic",
+                              "Arthritis, Psoriatic"),
+              wider_drug_groupings = c(
+                "L01 ANTINEOPLASTIC AGENTS",
+                "L04 IMMUNOSUPPRESSANTS",
+                "M01 ANTIINFLAMMATORY AND ANTIRHEUMATIC PRODUCTS, NON-STEROIDS"))
+
+# Wrap dataframe in function to allow code sharing with shiny
+trials_selected <- trials %>% 
+  select(-conditions) %>% 
+  inner_join(conditions_lkp %>% 
+               select(nct_id, conditions = condition_preferred) %>% 
+               filter(conditions %in% input$conditions),
+             by = "nct_id") %>% 
+  filter(comparator %in% input$trial_type) %>% 
+  select(nct_id, atc_7, a, b, enrollment,  conditions, nct_id_link, official_title, comparator) %>% 
+  distinct()
+
+table(trials_selected$conditions)
+```
+
+
+# Review trials without defined comparator status
+
+
+```{r review_comparator}
+trial_no_compare <- trials_selected %>% 
+  filter(comparator %in% c("undefined", "poss_plac_stnd")) %>% 
+  distinct(nct_id, official_title, nct_id_link, a, b, comparator)
+write_csv(trial_no_compare, path = "Scratch_data/review_trial_type_rheum.csv")
+
+```
+
+
+# Identify number of arms
+
+Recorded this in the same table where recorded study comparator type.
+
+```{r read_arms}
+arms <- readRDS(file = "scratch_data/number_of_arms_trials.Rds")
+arms <- arms %>% 
+  semi_join(trials_selected) %>% 
+  rename(arms = arm_max)
+
+stem(arms$arms)
+
+ts_xmn_arms <- trials_selected %>% 
+  anti_join(arms) %>% 
+  distinct(nct_id)
+
+```
+
+# Identify outcomes measured
+
+
+```{r outcomes_ra}
+#Connect to CTG
+drv <- dbDriver('PostgreSQL')
+con <- dbConnect(drv, dbname="aact",host="aact-db.ctti-clinicaltrials.org",
+                 port=5432, user="aact", password="aact")
+dbListTables(con) %>%  sort()
+
+ts_nct_ids <- MakeCommaSep(trials_selected$nct_id)
+designs <- dbGetQuery(con, paste0("SELECT * FROM designs
+                       WHERE designs.nct_id IN (",
+                       ts_nct_ids,
+                       ")"))
+outcome_analyses <- dbGetQuery(con, paste0("SELECT * FROM outcome_analyses
+                       WHERE outcome_analyses.nct_id IN (",
+                       ts_nct_ids,
+                       ")"))
+outcomes <- dbGetQuery(con, paste0("SELECT * FROM outcomes
+                       WHERE outcomes.nct_id IN (",
+                       ts_nct_ids,
+                       ")"))
+design_outcomes <- dbGetQuery(con, paste0("SELECT * FROM design_outcomes
+                       WHERE design_outcomes.nct_id IN (",
+                       ts_nct_ids,
+                       ")"))
+
+dbDisconnect(con)
+saveRDS(outcome_analyses, "Scratch_data/outcome_analyses_dmard_trials.Rds")
+saveRDS(designs, "Scratch_data/designs_dmard_trials.Rds")
+saveRDS(design_outcomes, "Scratch_data/design_outcomes_dmard_trials.Rds")
+saveRDS(outcomes, "Scratch_data/outcomes_dmard_trials.Rds")
+outcome_analyses <- readRDS("Scratch_data/outcome_analyses_dmard_trials.Rds")
+designs <- readRDS("Scratch_data/designs_dmard_trials.Rds")
+outcomes <- readRDS("Scratch_data/outcomes_dmard_trials.Rds")
+design_outcomes <- readRDS("Scratch_data/design_outcomes_dmard_trials.Rds")
+
+saveRDS(trials_selected, "Scratch_data/rheuamtology_etc_type_trials.Rds")
+saveRDS(codes, "Scratch_data/codes_for_rheum.Rds")
+saveRDS(atc_lbl, "Scratch_data/codes_lbls.Rds")
+sum(!duplicated(outcomes$nct_id)) # trials with outcomes reported 
+
+
+```
+
+
