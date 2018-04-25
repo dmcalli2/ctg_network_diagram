@@ -21,12 +21,12 @@ knitr::opts_chunk$set(cache=FALSE)
 
 ```{r source_functions}
 getwd()
-source("Scripts/00_functions_and_readme.R")
+# source("Scripts/00_functions_and_readme.R")
 ```
 
 ```{r read_data}
-load(file = "Scratch_data/data_for_network.Rdata")
-codes <- readRDS("scratch_data/normalised_names_and_atc_codes.rds")
+load(file = "Scratch_data/trials_conditions_lookup_atc_code_lookup.Rdata")
+load ("scratch_data/repository_trials.Rdata")
 ```
 
 # Select trials
